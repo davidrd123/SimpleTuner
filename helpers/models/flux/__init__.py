@@ -6,6 +6,40 @@ from helpers.training import steps_remaining_in_epoch
 from diffusers.pipelines.flux.pipeline_flux import (
     calculate_shift as calculate_shift_flux,
 )
+from scipy.stats import beta as Beta
+import wandb
+
+
+def calculate_shift(noise_shape, noise_scheduler):
+    """Calculate resolution-dependent shift using sequence length scaling.
+    
+    Args:
+        noise_shape: Shape of the noise tensor
+        noise_scheduler: Noise scheduler containing config parameters
+    """
+    # Calculate sequence length (same as Flux implementation)
+    image_seq_len = (noise_shape[-1] * noise_shape[-2]) // 4
+    
+    # Use scheduler's configured sequence lengths for scaling
+    base_seq_len = noise_scheduler.config.base_image_seq_len
+    max_seq_len = noise_scheduler.config.max_image_seq_len
+    
+    # Calculate normalized position in sequence length range
+    seq_len_scale = (image_seq_len - base_seq_len) / (max_seq_len - base_seq_len)
+    seq_len_scale = max(0.0, min(1.0, seq_len_scale))  # Clamp to [0, 1]
+    
+    # Use scheduler's shift parameters
+    shift_min = noise_scheduler.config.base_shift
+    shift_max = noise_scheduler.config.max_shift
+    
+    # Smooth transition using logistic function
+    steepness = 4.0
+    midpoint = 0.5
+    shift = shift_min + (shift_max - shift_min) * (
+        1 / (1 + math.exp(steepness * (seq_len_scale - midpoint)))
+    )
+    
+    return shift
 
 
 def apply_flux_schedule_shift(args, noise_scheduler, sigmas, noise):
@@ -119,3 +153,48 @@ def prepare_latent_image_ids(batch_size, height, width, device, dtype):
     )
 
     return latent_image_ids.to(device=device, dtype=dtype)[0]
+
+def calculate_sampling_weight(sigma, noise_shape, noise_scheduler, alpha=2, beta_param=4):
+    """Calculate sampling weights using Beta(2,4) with resolution-dependent shift.
+    
+    The core idea is to:
+    1. Use Beta(2,4) as our base distribution - good balance of structure/detail
+    2. Apply smaller shifts at higher resolutions to keep sampling in detail range
+    3. Apply larger shifts at lower resolutions to focus on structure
+    """
+    # Calculate sequence length like Flux does
+    image_seq_len = (noise_shape[-1] * noise_shape[-2]) // 4
+    
+    # Get normalized position in sequence length range [0,1]
+    seq_len_scale = (image_seq_len - noise_scheduler.config.base_image_seq_len) / (
+        noise_scheduler.config.max_image_seq_len - noise_scheduler.config.base_image_seq_len
+    )
+    seq_len_scale = max(0.0, min(1.0, seq_len_scale))
+    
+    # Base Beta(2,4) distribution
+    beta_dist = Beta(alpha, beta_param)
+    base = torch.exp(beta_dist.log_prob(sigma))
+    
+    # Calculate shift - smaller for higher resolutions
+    shift = noise_scheduler.config.max_shift - (
+        (noise_scheduler.config.max_shift - noise_scheduler.config.base_shift) 
+        * seq_len_scale
+    )
+    
+    # Apply shift to Beta distribution
+    shifted_sigma = (sigma * shift) / (1 + (shift - 1) * sigma)
+    shifted = torch.exp(beta_dist.log_prob(shifted_sigma))
+    
+    # Normalize
+    eps = 1e-8
+    weights = shifted / (shifted.sum() + eps)
+    
+    # Log distribution characteristics
+    if wandb.run is not None:
+        with torch.no_grad():
+            wandb.log({
+                f"shift_value_{image_seq_len}": shift,
+                f"mean_sigma_{image_seq_len}": (sigma * weights).sum().item()
+            })
+    
+    return weights

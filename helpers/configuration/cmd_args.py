@@ -1999,6 +1999,15 @@ def get_argument_parser():
             "Clear the cache from VRAM every X steps. This can help prevent memory leaks, but may slow down training."
         ),
     )
+    parser.add_argument(
+        "--flux_resolution_aware_beta",
+        action="store_true",
+        help=(
+            "When using Beta schedule for Flux training, adjust the beta parameter based on resolution."
+            " This helps preserve fine details in higher resolutions while maintaining structural learning in lower ones."
+            " Only applies when --flux_use_beta_schedule is enabled."
+        ),
+    )
 
     return parser
 

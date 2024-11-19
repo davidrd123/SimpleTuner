@@ -2227,6 +2227,15 @@ class Trainer:
                             alpha = self.config.flux_beta_schedule_alpha
                             beta = self.config.flux_beta_schedule_beta
 
+                            if self.config.flux_resolution_aware_beta:  # New flag
+                                # Use sequence length to adjust beta parameter
+                                image_seq_len = (noise.shape[-2] * noise.shape[-3]) // 4
+                                seq_len_scale = (image_seq_len - self.noise_scheduler.config.base_image_seq_len) / (
+                                    self.noise_scheduler.config.max_image_seq_len - self.noise_scheduler.config.base_image_seq_len
+                                )
+                                seq_len_scale = max(0.0, min(1.0, seq_len_scale))
+                                beta = beta * (1 + 0.2 * seq_len_scale)  # Increase beta for higher resolutions
+
                             # Create a Beta distribution instance
                             beta_dist = Beta(alpha, beta)
 
@@ -2707,7 +2716,6 @@ class Trainer:
                                 ]
                                 checkpoints = sorted(
                                     checkpoints, key=lambda x: int(x.split("-")[1])
-                                )
 
                                 # before we save the new checkpoint, we need to have at _most_ `checkpoints_total_limit - 1` checkpoints
                                 if (
